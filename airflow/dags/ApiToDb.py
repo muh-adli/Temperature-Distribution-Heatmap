@@ -16,7 +16,7 @@ default_args = {
 }
 
 dag = DAG(
-    'data_pipeline_dag',
+    'ApiToDB',
     default_args=default_args,
     description='Data pipeline DAG',
     schedule_interval=timedelta(days=1),  # Adjust as needed
@@ -47,6 +47,8 @@ coordinates = [
     [117.90745199344171, 1.258660675956391],
     [117.87083205633546, 1.211997181266125]
 ]
+
+
 
 def collect_data_from_api(**kwargs):
     api_key = '692d85fddc6d426aa15121827242806'
@@ -79,14 +81,14 @@ def etl_process(**kwargs):
     print("Transformed data:", transformed_data)  # Print the transformed data
     return transformed_data
 
-def insert_data_into_postgres(**kwargs):
-    data = kwargs['ti'].xcom_pull(task_ids='etl_process')
-    pg_hook = PostgresHook(postgres_conn_id='postgres_default')
-    table_name = 'dailyClimate'  # Replace with your table name
-    rows_to_insert = [(record,) for record in data['data']]  # Adjust this based on your table structure
-    pg_hook.insert_rows(table=table_name, rows=rows_to_insert)
-    print("Data inserted into PostgreSQL!")  # Print confirmation
-    return 'Data inserted successfully into PostgreSQL!'
+# def insert_data_into_postgres(**kwargs):
+#     data = kwargs['ti'].xcom_pull(task_ids='etl_process')
+#     pg_hook = PostgresHook(postgres_conn_id='postgres_default')
+#     table_name = 'dailyClimate'  # Replace with your table name
+#     rows_to_insert = [(record,) for record in data['data']]  # Adjust this based on your table structure
+#     pg_hook.insert_rows(table=table_name, rows=rows_to_insert)
+#     print("Data inserted into PostgreSQL!")  # Print confirmation
+#     return 'Data inserted successfully into PostgreSQL!'
 
 # Define tasks
 collect_data_task = PythonOperator(
@@ -103,12 +105,13 @@ etl_process_task = PythonOperator(
     dag=dag,
 )
 
-insert_data_task = PythonOperator(
-    task_id='insert_data_into_postgres',
-    python_callable=insert_data_into_postgres,
-    provide_context=True,
-    dag=dag,
-)
+# insert_data_task = PythonOperator(
+#     task_id='insert_data_into_postgres',
+#     python_callable=insert_data_into_postgres,
+#     provide_context=True,
+#     dag=dag,
+# )
 
 # Define task dependencies
-collect_data_task >> etl_process_task >> insert_data_task
+# collect_data_task >> etl_process_task >> insert_data_task
+collect_data_task >> etl_process_task 
