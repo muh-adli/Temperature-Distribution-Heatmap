@@ -45,7 +45,7 @@ def fetch_weather_data(api_key, ti, **kwargs):
     weather_data = []
     for coordinates in coordinates_array:
         # Convert the coordinates to a comma-separated string
-        coor_str = f"{coordinates[1]},{coordinates[0]}"
+        coor_str = f"{coordinates[0]},{coordinates[1]}"
         url = f"http://api.weatherapi.com/v1/current.json?key={api_key}&q={coor_str}"
         response = requests.get(url)
         logging.info("fetching url")
