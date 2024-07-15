@@ -27,9 +27,8 @@ dag = DAG(
 )
 
 def process_coordinates(ti):
-    coordinates = ti.xcom_pull(task_ids='fetching_coordinates')
+    coordinates = ti.xcom_pull(task_ids='fetching_postgres')
     if coordinates:
-        logging.info(f"Raw coordinates fetched: {coordinates}")
         processed_coordinates = []
         for coord in coordinates:
             if len(coord) == 4:
@@ -37,12 +36,12 @@ def process_coordinates(ti):
             else:
                 logging.error(f"Unexpected coordinate format: {coord}")
         ti.xcom_push(key='coordinates_array', value=processed_coordinates)
-        logging.info(f"Processed coordinates: {processed_coordinates}")
+        # logging.info(f"Processed coordinates: {processed_coordinates}")
     else:
         logging.error("Station coordinates not fetched.")
 
 def fetch_weather_data(api_key, ti):
-    coordinates_array = ti.xcom_pull(task_ids='preprocessing_coordinates', key='coordinates_array')
+    coordinates_array = ti.xcom_pull(task_ids='preprocessing', key='coordinates_array')
     
     if not coordinates_array:
         logging.error("Error! No coordinates available.")
@@ -95,7 +94,7 @@ def fetch_weather_data(api_key, ti):
     ti.xcom_push(key='weather_data', value=weather_data_json)
 
 def insert_weather_data(ti):
-    weather_data_json = ti.xcom_pull(task_ids='fetch_weather_data', key='weather_data')
+    weather_data_json = ti.xcom_pull(task_ids='fetch_API', key='weather_data')
     
     if not weather_data_json:
         logging.error("No weather data available.")
@@ -103,29 +102,38 @@ def insert_weather_data(ti):
 
     weather_data = json.loads(weather_data_json)
     # logging.info(f"Weather data to be inserted: {weather_data}")
-
     insert_sql = """
-    INSERT INTO weather_data (station_id, station_name, temp_c, wind_kph, wind_degree, pressure_mb, humidity, uv)
+    INSERT INTO dailyclimate (idloc, tempc, windkph, winddeg, pressmb, hum, uv, timestamp)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
-
+    logging.info(f"Executing SQL: {insert_sql}")
     pg_hook = PostgresHook(postgres_conn_id='finpro_climate')
 
     for station_id, weather_info in weather_data.items():
-        values = (
-            weather_info['station_id'],
-            weather_info['temp_c'],
-            weather_info['wind_kph'],
-            weather_info['wind_degree'],
-            weather_info['pressure_mb'],
-            weather_info['humidity'],
-            weather_info['uv'],
-            weather_info['timestamp']
-        )
-        logging.info(f"Executing SQL: {insert_sql}")
-        logging.info(f"With parameters: {values}")
-        # pg_hook.run(insert_sql, parameters=values)
-        logging.info(f"Inserted weather data for station ID: {station_id}")
+        check_sql = """
+        SELECT COUNT(*) FROM dailyclimate WHERE idloc = %s AND timestamp = %s
+        """
+        check_params = (weather_info['station_id'], weather_info['timestamp'])
+        
+        records = pg_hook.get_first(sql=check_sql, parameters=check_params)
+        
+        if records[0] == 0:
+            values = (
+                weather_info['station_id'],
+                weather_info['temp_c'],
+                weather_info['wind_kph'],
+                weather_info['wind_degree'],
+                weather_info['pressure_mb'],
+                weather_info['humidity'],
+                weather_info['uv'],
+                weather_info['timestamp']
+            )
+
+            logging.info(f"With parameters: {values}")
+            pg_hook.run(insert_sql, parameters=values)
+            logging.info(f"Inserted weather data for station ID: {station_id}")
+        else:
+            logging.info(f"Record already exists for station ID: {station_id} at timestamp: {weather_info['timestamp']}")
 
 ## DAG Task
 
