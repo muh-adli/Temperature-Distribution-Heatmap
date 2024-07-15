@@ -1,10 +1,12 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 from datetime import datetime, timedelta
 import requests
 import logging
+import json
 
 default_args = {
     'owner': 'airflow',
@@ -20,68 +22,140 @@ dag = DAG(
     'finpro_climate',
     default_args=default_args,
     description='Finpro Data pipeline DAG',
-    schedule_interval=None,
-    # schedule_interval='*/30 * * * *',  # Uncomment to run every 30 minutes
+    schedule_interval='*/30 * * * *',
     catchup=False,
 )
 
 def process_coordinates(ti):
     coordinates = ti.xcom_pull(task_ids='fetching_coordinates')
     if coordinates:
-        # Convert the list of tuples with Decimals to a list of lists with floats
-        coordinates_array = [[float(coord[0]), float(coord[1])] for coord in coordinates]
-        ti.xcom_push(key='coordinates_array', value=coordinates_array)
-        logging.info(f"Coordinates fetched: {coordinates_array}")
+        logging.info(f"Raw coordinates fetched: {coordinates}")
+        processed_coordinates = []
+        for coord in coordinates:
+            if len(coord) == 4:
+                processed_coordinates.append([float(coord[0]), float(coord[1]), coord[2], coord[3]])
+            else:
+                logging.error(f"Unexpected coordinate format: {coord}")
+        ti.xcom_push(key='coordinates_array', value=processed_coordinates)
+        logging.info(f"Processed coordinates: {processed_coordinates}")
     else:
-        logging.warning("No coordinates fetched.")
+        logging.error("Station coordinates not fetched.")
 
-def fetch_weather_data(api_key, ti, **kwargs):
+def fetch_weather_data(api_key, ti):
     coordinates_array = ti.xcom_pull(task_ids='preprocessing_coordinates', key='coordinates_array')
     
     if not coordinates_array:
-        logging.error("No coordinates available for API call.")
+        logging.error("Error! No coordinates available.")
         return
 
-    weather_data = []
+    weather_data = {}
     for coordinates in coordinates_array:
-        # Convert the coordinates to a comma-separated string
-        coor_str = f"{coordinates[0]},{coordinates[1]}"
-        url = f"http://api.weatherapi.com/v1/current.json?key={api_key}&q={coor_str}"
-        response = requests.get(url)
-        logging.info("fetching url")
-        logging.info(url)
+        try:
+            stationId = coordinates[2]
+            stationName = coordinates[3]
+            coor_str = f"{coordinates[0]},{coordinates[1]}"
+            url = f"http://api.weatherapi.com/v1/current.json?key={api_key}&q={coor_str}"
+            response = requests.get(url)
+            print("fetching url on", str(stationName), "Id", str(stationId))
+            
+            if response.status_code == 200:
+                logging.info(f"Successfully connected to API on {stationName}")
+                data = response.json()
+                if 'current' in data:
+                    current_weather = data['current']
+                    weather_info = {
+                        "station_id": stationId,
+                        "station_name": stationName,
+                        "temp_c": current_weather.get("temp_c"),
+                        "wind_kph": current_weather.get("wind_kph"),
+                        "wind_degree": current_weather.get("wind_degree"),
+                        "pressure_mb": current_weather.get("pressure_mb"),
+                        "humidity": current_weather.get("humidity"),
+                        "uv": current_weather.get("uv"),
+                        "timestamp": current_weather.get("last_updated")
+                        }
+                    weather_data[stationId] = weather_info
 
-        if response.status_code == 200:
-            logging.info(f"Successfully collected data for {coor_str}")
-            weather_data.append(response.json())
-        else:
-            logging.error(f"Failed to fetch data for {coor_str}. Status code: {response.status_code}")
-    
+                    logging.info(f"Data collected at {current_weather['last_updated']}")
+                    print("----------------------------------------------------------")
+                    print(weather_info)
+                    print("----------------------------------------------------------")
+                else:
+                    logging.error(f"Error on {coor_str}. Missing 'current' key.")
+            else:
+                logging.error(f"Failed to fetch data for {coor_str}. Status code: {response.status_code}")
+            logging.info("========================================")
+        except IndexError as e:
+            logging.error(f"Error processing coordinates {coordinates}: {e}")
+
     logging.info(f"Collected {len(weather_data)} data points.")
-    ti.xcom_push(key='weather_data', value=weather_data)
+    print("=====================================================")
+    weather_data_json = json.dumps(weather_data)
+    print(weather_data_json)
+    ti.xcom_push(key='weather_data', value=weather_data_json)
 
-# Task to fetch coordinates from PostgreSQL
-get_coordinates = PostgresOperator(
-    task_id='fetching_coordinates',
+def insert_weather_data(ti):
+    weather_data_json = ti.xcom_pull(task_ids='fetch_weather_data', key='weather_data')
+    
+    if not weather_data_json:
+        logging.error("No weather data available.")
+        return
+
+    weather_data = json.loads(weather_data_json)
+    # logging.info(f"Weather data to be inserted: {weather_data}")
+
+    insert_sql = """
+    INSERT INTO weather_data (station_id, station_name, temp_c, wind_kph, wind_degree, pressure_mb, humidity, uv)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    pg_hook = PostgresHook(postgres_conn_id='finpro_climate')
+
+    for station_id, weather_info in weather_data.items():
+        values = (
+            weather_info['station_id'],
+            weather_info['temp_c'],
+            weather_info['wind_kph'],
+            weather_info['wind_degree'],
+            weather_info['pressure_mb'],
+            weather_info['humidity'],
+            weather_info['uv'],
+            weather_info['timestamp']
+        )
+        logging.info(f"Executing SQL: {insert_sql}")
+        logging.info(f"With parameters: {values}")
+        # pg_hook.run(insert_sql, parameters=values)
+        logging.info(f"Inserted weather data for station ID: {station_id}")
+
+## DAG Task
+
+get_coor = PostgresOperator(
+    task_id='fetching_postgres',
     postgres_conn_id='finpro_climate',
-    sql='SELECT lat, long FROM stationlocation;',
+    sql='SELECT lat, long, id, name FROM stationlocation;',
     dag=dag,
 )
 
-# Task to process the fetched coordinates
-process_coordinates_task = PythonOperator(
-    task_id='preprocessing_coordinates',
+process_coor = PythonOperator(
+    task_id='preprocessing',
     python_callable=process_coordinates,
+    provide_context=True,
     dag=dag,
 )
 
-# Task to fetch weather data for the coordinates
-fetch_weather_data_task = PythonOperator(
-    task_id='fetch_weather_data',
+fetch_weather = PythonOperator(
+    task_id='fetch_API',
     python_callable=fetch_weather_data,
     op_kwargs={'api_key': '692d85fddc6d426aa15121827242806'},
+    provide_context=True,
     dag=dag,
 )
 
-# Define task dependencies
-get_coordinates >> process_coordinates_task >> fetch_weather_data_task
+insert_postgres = PythonOperator(
+    task_id='insert_postgres',
+    python_callable=insert_weather_data,
+    provide_context=True,
+    dag=dag,
+)
+
+get_coor >> process_coor >> fetch_weather >> insert_postgres
