@@ -326,9 +326,23 @@ services:
     command: "--config.file=/prometheus.yaml"
     networks:
       - dibimbing
+  
+  grafana:
+    image: grafana/grafana-enterprise
+    container_name: finpro-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"  # Corrected port mapping
+    volumes:
+      - grafana-storage:/var/lib/grafana  # Volume for Grafana storage
+    depends_on:
+      - postgres  # Adjust dependencies as needed
+    networks:
+      - dibimbing
 
 volumes:
   postgres-db-volume:
+  grafana-storage: {}
 
 networks:
   dibimbing:
